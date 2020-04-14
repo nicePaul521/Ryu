@@ -15,7 +15,6 @@ import networkx as nx
 from operator import attrgetter
 from ryu import cfg
 from ryu.base import app_manager
-from ryu.base.app_manager import lookup_service_brick
 from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER
 from ryu.controller.handler import CONFIG_DISPATCHER
@@ -25,14 +24,17 @@ from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ipv4
 from ryu.lib.packet import arp
+
 from ryu.topology import event, switches
 from ryu.topology.api import get_switch, get_link
+
 import network_awareness
-from multy_qos_path import FPTAS_SMCP
-from qos import QoS
-from k_short import K_Short
+import network_monitor
+import network_delay_detector
+
 
 CONF = cfg.CONF
+
 
 class ShortestForwarding(app_manager.RyuApp):
     """
@@ -44,30 +46,29 @@ class ShortestForwarding(app_manager.RyuApp):
 
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
     _CONTEXTS = {
-        "network_awareness":network_awareness.NetworkAwareness,
-        "qos":QoS
-    }
+        "network_awareness": network_awareness.NetworkAwareness,
+        "network_monitor": network_monitor.NetworkMonitor,
+        "network_delay_detector": network_delay_detector.NetworkDelayDetector}
 
-    # WEIGHT_MODEL = {'hop': 'weight', 'delay': "delay", "bw": "bw"}
-    Load_Balance = {'true':True,'false':False}
+    WEIGHT_MODEL = {'hop': 'weight', 'delay': "delay", "bw": "bw"}
 
     def __init__(self, *args, **kwargs):
         super(ShortestForwarding, self).__init__(*args, **kwargs)
         self.name = 'shortest_forwarding'
         self.awareness = kwargs["network_awareness"]
-        self.qos = kwargs["qos"]
+        self.monitor = kwargs["network_monitor"]
+        self.delay_detector = kwargs["network_delay_detector"]
         self.datapaths = {}
-        self.load_balace = self.Load_Balance[CONF.lb]
-        # self.weight = self.WEIGHT_MODEL[CONF.weight]
+        self.weight = self.WEIGHT_MODEL[CONF.weight]
 
-    # def set_weight_mode(self, weight):
-    #     """
-    #         set weight mode of path calculating.
-    #     """
-    #     self.weight = weight
-    #     if self.weight == self.WEIGHT_MODEL['hop']:
-    #         self.awareness.get_shortest_paths(weight=self.weight)
-    #     return True
+    def set_weight_mode(self, weight):
+        """
+            set weight mode of path calculating.
+        """
+        self.weight = weight
+        if self.weight == self.WEIGHT_MODEL['hop']:
+            self.awareness.get_shortest_paths(weight=self.weight)
+        return True
 
     @set_ev_cls(ofp_event.EventOFPStateChange,
                 [MAIN_DISPATCHER, DEAD_DISPATCHER])
@@ -107,13 +108,19 @@ class ShortestForwarding(app_manager.RyuApp):
         """
         parser = datapath.ofproto_parser
         actions = []
+
+        if flow_info[1] == '10.0.0.1':
+            actions.append(parser.OFPActionSetQueue(1))
+        if flow_info[1] == '10.0.0.2':
+            actions.append(parser.OFPActionSetQueue(2))
+
         actions.append(parser.OFPActionOutput(dst_port))
         match = parser.OFPMatch(
             in_port=src_port, eth_type=flow_info[0],
             ipv4_src=flow_info[1], ipv4_dst=flow_info[2])
 
         self.add_flow(datapath, 1, match, actions,
-                      idle_timeout=5, hard_timeout=12)
+                      idle_timeout=15, hard_timeout=60)
 
     def _build_packet_out(self, datapath, buffer_id, src_port, dst_port, data):
         """
@@ -207,35 +214,42 @@ class ShortestForwarding(app_manager.RyuApp):
         else:
             self.flood(msg)
 
-    def get_path(self, src, dst,K=3,W=12,e=0.8,load_balance=False):
+    def get_path(self, src, dst, weight):
         """
             Get shortest path from network awareness module.
         """
         shortest_paths = self.awareness.shortest_paths
-        identify = self.qos.identify
-        paths = shortest_paths.get(src).get(dst)
-        delay_threshold = 30
-        cost_threshold = 30
-        _G = self.qos.get_G()
-        if _G is not None and identify:
-            self.qos.identify = False
-            if load_balance:               
-                kshort = K_Short(_G,src,dst)
-                res = kshort.min_cost_path(delay_threshold,cost_threshold)
-                if res is None:
-                    print('There is no feasible path')
-                elif len(res)>=2:
-                    paths = res[:2]
-            else:
-                smcp = FPTAS_SMCP(_G,src,dst,K,W,e)
-                res = smcp.SMCP()
-                if res is None:
-                    print('There is no feasible path')
-                else:
-                    paths[:] = []
-                    p_lst = [e[0] for e in res if e[0]!='t']
-                    paths.append(p_lst)
-        return paths
+        graph = self.awareness.graph
+
+        if weight == self.WEIGHT_MODEL['hop']:
+            return shortest_paths.get(src).get(dst)[0]
+        elif weight == self.WEIGHT_MODEL['delay']:
+            # If paths existed, return it, else calculate it and save it.
+            try:
+                paths = shortest_paths.get(src).get(dst)
+                return paths
+            except:
+                paths = self.awareness.k_shortest_paths(graph, src, dst,
+                                                        weight=weight)
+
+                shortest_paths.setdefault(src, {})
+                shortest_paths[src].setdefault(dst, paths)
+                return paths
+        elif weight == self.WEIGHT_MODEL['bw']:
+            # Because all paths will be calculate
+            # when call self.monitor.get_best_path_by_bw
+            # So we just need to call it once in a period,
+            # and then, we can get path directly.
+            try:
+                # if path is existed, return it.
+                path = self.monitor.best_paths.get(src).get(dst)
+                return path
+            except:
+                # else, calculate it, and return.
+                paths = self.monitor.get_best_path_by_bw(graph,
+                                                          shortest_paths)
+                best_paths = paths.get(src).get(dst)
+                return best_paths
 
     def get_sw(self, dpid, in_port, src, dst):
         """
@@ -336,11 +350,11 @@ class ShortestForwarding(app_manager.RyuApp):
 
         result = self.get_sw(datapath.id, in_port, ip_src, ip_dst)
         if result:
-            src_sw, dst_sw = result[0],result[1]
+            src_sw, dst_sw = result[0], result[1]
             if dst_sw:
-                #Path has already calculated, just get it.
-                print('load_balance:',self.load_balace)
-                paths = self.get_path(src_sw, dst_sw,load_balance=self.load_balace)
+                # Path has already calculated, just get it.
+                paths = self.get_path(src_sw, dst_sw, weight=self.weight)
+                print('paths',paths)
                 if ip_src == '10.0.0.1':
                     self.logger.info("[PATH]%s<-->%s: %s" % (ip_src, ip_dst, paths[0]))
                     flow_info = (eth_type, ip_src, ip_dst, in_port)
@@ -350,12 +364,12 @@ class ShortestForwarding(app_manager.RyuApp):
                                     self.awareness.access_table, paths[0],
                                     flow_info, msg.buffer_id, msg.data)
                 if ip_src == '10.0.0.2':
-                    self.logger.info("[PATH]%s<-->%s: %s" % (ip_src, ip_dst, paths[-1]))
+                    self.logger.info("[PATH]%s<-->%s: %s" % (ip_src, ip_dst, paths[1]))
                     flow_info = (eth_type, ip_src, ip_dst, in_port)
                 # install flow entries to datapath along side the path.
                     self.install_flow(self.datapaths,
                                     self.awareness.link_to_port,
-                                    self.awareness.access_table, paths[-1],
+                                    self.awareness.access_table, paths[1],
                                     flow_info, msg.buffer_id, msg.data)
                 
         return

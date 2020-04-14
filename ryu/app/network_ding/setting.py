@@ -5,8 +5,6 @@ DISCOVERY_PERIOD = 10   			# For discovering topology.
 
 MONITOR_PERIOD = 10					# For monitoring traffic
 
-LOSS_PERIOD = 10
-
 DELAY_DETECTING_PERIOD = 5			# For detecting link delay.
 
 TOSHOW = True						# For showing information in terminal

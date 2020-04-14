@@ -130,4 +130,5 @@ CONF.register_cli_opts([
 CONF.register_cli_opts([
         # k_shortest_forwarding
     cfg.IntOpt('k-paths', default=1, help='number for k shortest paths'),
-    cfg.StrOpt('lb',default='false',help='whether achiving load balance[true/false]')])
+    cfg.StrOpt('lb',default='false',help='whether achiving load balance[true/false]'),
+    cfg.StrOpt('weight', default='hop',help='weight type of computing shortest path.')])

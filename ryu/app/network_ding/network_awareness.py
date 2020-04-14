@@ -86,8 +86,10 @@ class NetworkAwareness(app_manager.RyuApp):
     def register_access_table(self):
         self.access_table[(1,1)] = ('10.0.0.1','00:00:00:00:00:01')
         self.access_table[(1,2)] = ('10.0.0.2','00:00:00:00:00:02')
-        self.access_table[(6,4)] = ('10.0.0.3','00:00:00:00:00:03')
-        self.access_table[(6,5)] = ('10.0.0.4','00:00:00:00:00:04')
+        self.access_table[(1,3)] = ('10.0.0.3','00:00:00:00:00:03')
+        self.access_table[(1,4)] = ('10.0.0.4','00:00:00:00:00:04')
+        self.access_table[(1,5)] = ('10.0.0.5','00:00:00:00:00:05')
+        self.access_table[(8,6)] = ('10.0.0.6','00:00:00:00:00:06')
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -187,7 +189,7 @@ class NetworkAwareness(app_manager.RyuApp):
             interior_port = self.interior_ports[sw]
             self.access_ports[sw] = all_port_table - interior_port
 
-    def k_shortest_paths(self, graph, src, dst, weight='weight', k=2):
+    def k_shortest_paths(self, graph, src, dst, weight='weight', k=5):
         """
             Great K shortest paths of src to dst.
         """
@@ -204,7 +206,7 @@ class NetworkAwareness(app_manager.RyuApp):
         except:
             self.logger.debug("No path between %s and %s" % (src, dst))
 
-    def all_k_shortest_paths(self, graph, weight='weight', k=2):
+    def all_k_shortest_paths(self, graph, weight='weight', k=5):
         """
             Creat all K shortest paths between datapaths.
         """
@@ -241,7 +243,8 @@ class NetworkAwareness(app_manager.RyuApp):
         self.create_access_ports()
         self.get_graph(self.link_to_port.keys())
         self.shortest_paths = self.all_k_shortest_paths(
-            self.graph, weight='weight', k=CONF.k_paths)
+            self.graph, weight='weight')
+
 
     def show_topology(self):
         switch_num = len(list(self.graph.nodes()))
