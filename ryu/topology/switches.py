@@ -249,6 +249,7 @@ class PortData(object):
         self.lldp_data = lldp_data
         self.timestamp = None
         self.sent = 0
+        self.delay = 0
 
     def lldp_sent(self):
         self.timestamp = time.time()
@@ -766,15 +767,16 @@ class Switches(app_manager.RyuApp):
                       dp.ofproto.OFP_VERSION)
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
-    def lldp_packet_in_handler(self, ev):
+    def packet_in_handler(self, ev):
+        recv_timestamp = time.time()
         if not self.link_discovery:
             return
 
         msg = ev.msg
         try:
             src_dpid, src_port_no = LLDPPacket.lldp_parse(msg.data)
-        except LLDPPacket.LLDPUnknownFormat:
-            # This handler can receive all the packets which can be
+        except LLDPPacket.LLDPUnknownFormat as e:
+            # This handler can receive all the packtes which can be
             # not-LLDP packet. Ignore it silently
             return
 
@@ -787,6 +789,13 @@ class Switches(app_manager.RyuApp):
             LOG.error('cannot accept LLDP. unsupported version. %x',
                       msg.datapath.ofproto.OFP_VERSION)
 
+        # get the lldp delay
+        for port in self.ports.keys():
+            if src_dpid == port.dpid and src_port_no == port.port_no:
+                send_timestamp = self.ports[port].timestamp
+                if send_timestamp:
+                    self.ports[port].delay = recv_timestamp - send_timestamp
+
         src = self._get_port(src_dpid, src_port_no)
         if not src or src.dpid == dst_dpid:
             return
@@ -796,7 +805,7 @@ class Switches(app_manager.RyuApp):
             # There are races between EventOFPPacketIn and
             # EventDPPortAdd. So packet-in event can happend before
             # port add event. In that case key error can happend.
-            # LOG.debug('lldp_received error', exc_info=True)
+            # LOG.debug('lldp_received: KeyError %s', e)
             pass
 
         dst = self._get_port(dst_dpid, dst_port_no)
@@ -810,21 +819,11 @@ class Switches(app_manager.RyuApp):
         # LOG.debug("  old_peer=%s", old_peer)
         if old_peer and old_peer != dst:
             old_link = Link(src, old_peer)
-            del self.links[old_link]
             self.send_event_to_observers(event.EventLinkDelete(old_link))
 
         link = Link(src, dst)
         if link not in self.links:
             self.send_event_to_observers(event.EventLinkAdd(link))
-
-            # remove hosts if it's not attached to edge port
-            host_to_del = []
-            for host in self.hosts.values():
-                if not self._is_edge_port(host.port):
-                    host_to_del.append(host.mac)
-
-            for host_mac in host_to_del:
-                del self.hosts[host_mac]
 
         if not self.links.update_link(src, dst):
             # reverse link is not detected yet.
@@ -833,62 +832,6 @@ class Switches(app_manager.RyuApp):
             self.lldp_event.set()
         if self.explicit_drop:
             self._drop_packet(msg)
-
-    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
-    def host_discovery_packet_in_handler(self, ev):
-        msg = ev.msg
-        eth, pkt_type, pkt_data = ethernet.ethernet.parser(msg.data)
-
-        # ignore lldp and cfm packets
-        if eth.ethertype in (ETH_TYPE_LLDP, ETH_TYPE_CFM):
-            return
-
-        datapath = msg.datapath
-        dpid = datapath.id
-        port_no = -1
-
-        if msg.datapath.ofproto.OFP_VERSION == ofproto_v1_0.OFP_VERSION:
-            port_no = msg.in_port
-        else:
-            port_no = msg.match['in_port']
-
-        port = self._get_port(dpid, port_no)
-
-        # can't find this port(ex: logic port)
-        if not port:
-            return
-        # ignore switch-to-switch port
-        if not self._is_edge_port(port):
-            return
-
-        host_mac = eth.src
-        host = Host(host_mac, port)
-
-        if host_mac not in self.hosts:
-            self.hosts.add(host)
-            ev = event.EventHostAdd(host)
-            self.send_event_to_observers(ev)
-        elif self.hosts[host_mac].port != port:
-            # assumes the host is moved to another port
-            ev = event.EventHostMove(src=self.hosts[host_mac], dst=host)
-            self.hosts[host_mac] = host
-            self.send_event_to_observers(ev)
-
-        # arp packet, update ip address
-        if eth.ethertype == ether_types.ETH_TYPE_ARP:
-            arp_pkt, _, _ = pkt_type.parser(pkt_data)
-            self.hosts.update_ip(host, ip_v4=arp_pkt.src_ip)
-
-        # ipv4 packet, update ipv4 address
-        elif eth.ethertype == ether_types.ETH_TYPE_IP:
-            ipv4_pkt, _, _ = pkt_type.parser(pkt_data)
-            self.hosts.update_ip(host, ip_v4=ipv4_pkt.src)
-
-        # ipv6 packet, update ipv6 address
-        elif eth.ethertype == ether_types.ETH_TYPE_IPV6:
-            # TODO: need to handle NDP
-            ipv6_pkt, _, _ = pkt_type.parser(pkt_data)
-            self.hosts.update_ip(host, ip_v6=ipv6_pkt.src)
 
     def send_lldp_packet(self, port):
         try:
