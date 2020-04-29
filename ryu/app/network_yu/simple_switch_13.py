@@ -33,10 +33,14 @@ class SimpleSwitch13(app_manager.RyuApp):
 
     def __init__(self, *args, **kwargs):
         super(SimpleSwitch13, self).__init__(*args, **kwargs)
-        self.mac_to_port = {1:{'00:00:00:00:00:01':1,'00:00:00:00:00:02':2}}
-        #self.p_num = 0
+        self.mac_to_port = {1:{'00:00:00:00:00:01':1,'00:00:00:00:00:02':2,'00:00:00:00:00:03':3,'00:00:00:00:00:04':4}}
+        self.p_num = {}
+        self.dataSet = {}
+        self.packet_lst = []
+        self.host_lst = []
         self.flag = False
-        self.cla = Cla(threshold=50,numSimple=60,writeFlag=True)
+        self.pre_time = 0
+        self.cla = Cla(threshold=50,numSimple=40)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -81,7 +85,36 @@ class SimpleSwitch13(app_manager.RyuApp):
                 return (ip_src,port_src,ip_dst,port_dst,tran_type),(length,timestamp)
 
         return None  
+
+    def feed_data(self,result):
+
+        key,value = result[0],result[1]
+        #sub_time = value[1] - self.pre_time
+        #self.pre_time = value[1]
+        if key not in self.packet_lst:
+            self.packet_lst.append(key)
+            self.dataSet.setdefault(key,[])
+            #self.p_num[key] = 0
+
+        # if self.p_num[key] == 0:
+        #     value_lst = [value[0],0]
+        # else:
+        #     value_lst = [value[0],sub_time]
+
+        self.dataSet[key].append(list(value))
+        #self.p_num[key] = self.p_num[key] + 1
+        length_packet = len(self.dataSet[key])
+        if length_packet == 200:
+            print("the length of dataSet is: %d" % len(self.dataSet[key]))
+            #self.pre_time = 0
+            #self.p_num[key] = 0#initiaziong count
+            
+            ret = self.cla.en_queue(key,self.dataSet[key])
+            self.dataSet[key][:] = []
+            return ret
         
+        return 0
+
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -100,48 +133,47 @@ class SimpleSwitch13(app_manager.RyuApp):
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
 
-        if eth.ethertype == ether_types.ETH_TYPE_LLDP:
-            # ignore lldp packet
-            return
-
         dst = eth.dst
         src = eth.src
        # dpid = format(datapath.id, "d").zfill(16)
         dpid = datapath.id
         
-
         if dst in self.mac_to_port[dpid]:
             out_port = self.mac_to_port[dpid][dst]
         else:
             out_port = ofproto.OFPP_FLOOD
-        
-        match = parser.OFPMatch(in_port=in_port,eth_dst = dst,eth_src=src)
 
+        if (src,dst) not in self.host_lst:
+            self.host_lst.append((src,dst))      
+            match = parser.OFPMatch(in_port=in_port,eth_dst = dst,eth_src=src)
+            if dst == '00:00:00:00:00:01':
+                actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,ofproto.OFPCML_NO_BUFFER)]
+                self.add_flow(datapath,2,match,actions)
 
-        if dst == '00:00:00:00:00:01' and self.flag==False:
-            actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,ofproto.OFPCML_NO_BUFFER)]
-            self.add_flow(datapath,2,match,actions)
+            else:
+                actions = [parser.OFPActionOutput(out_port)]
+                # install a flow to avoid packet_in next time
+                if out_port != ofproto.OFPP_FLOOD:
+                    match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
+                    # verify if we have a valid buffer_id, if yes avoid to send both
+                    # flow_mod & packet_out
+                    if msg.buffer_id != ofproto.OFP_NO_BUFFER:
+                        self.add_flow(datapath, 1, match, actions, msg.buffer_id)
+                        return
+                    else:
+                        self.add_flow(datapath, 1, match, actions)
+
+        elif dst == '00:00:00:00:00:01' and self.flag==False:
+            out_port = 1
             if isinstance(ip_pkt,ipv4.ipv4):         
                 res = self.packet_feature(msg,ip_pkt.src,ip_pkt.dst)
                 if res:
-                    readF = self.cla.en_queue(res[0],res[1])
-                    if readF:
+                    self.flag = True #stop packet go forward to dataSet
+                    ret = self.feed_data(res)
+                    self.flag = False#start leting packet enter dataSet
+                    if ret == 2:
                         self.flag = True
-
-        
-        else:
-            actions = [parser.OFPActionOutput(out_port)]
-            # install a flow to avoid packet_in next time
-            if out_port != ofproto.OFPP_FLOOD:
-                match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
-                # verify if we have a valid buffer_id, if yes avoid to send both
-                # flow_mod & packet_out
-                if msg.buffer_id != ofproto.OFP_NO_BUFFER:
-                    self.add_flow(datapath, 1, match, actions, msg.buffer_id)
-                    return
-                else:
-                    self.add_flow(datapath, 1, match, actions)
-                    
+        # send pack-out message to datapath
         actions = [parser.OFPActionOutput(out_port)]
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
