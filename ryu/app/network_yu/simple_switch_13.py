@@ -40,7 +40,7 @@ class SimpleSwitch13(app_manager.RyuApp):
         self.host_lst = []
         self.flag = False
         self.pre_time = 0
-        self.cla = Cla(threshold=50,numSimple=40)
+        self.cla = Cla(threshold=200,numSimple=500)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):

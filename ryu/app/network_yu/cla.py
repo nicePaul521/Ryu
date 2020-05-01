@@ -1,13 +1,9 @@
-#import copy
-#import pandas as pd
-#from sklearn.externals import joblib
-#from pandas import Series,DataFrame
 import csv
 import numpy as np
 
 class Cla:
     
-    def __init__(self,threshold=200,numSimple=50):
+    def __init__(self,threshold=200,numSimple=250):
         
         self.threshold = threshold
         self.numSimple = numSimple
@@ -55,9 +51,9 @@ class Cla:
         #for i,key in enumerate(self.data_feature.keys()):
         #print("the length of dataSet is %d" % len(self.data_feature[packet_info]))
         for ele in dataSet:
-            df.append(ele+[0])
+            df.append(ele+[2])
         
-        with open("test.csv","w") as csvfile: 
+        with open("f2.csv","w") as csvfile: 
             writer = csv.writer(csvfile)  
             writer.writerow(["l_mean","l_std","t_mean","t_std","count","class"]) 
             writer.writerows(df)
