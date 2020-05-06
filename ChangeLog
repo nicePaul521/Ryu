@@ -1,6 +1,12 @@
 CHANGES
 =======
 
+* 5.1 modify
+* 4.29 Modetify
+* 4.26 M
+* submint
+* first commit
+* Fix two bugs in simple switch 13 examples
 * Restrict tinyrpc to version 0.9.4 as newer versions break python2 support
 
 v4.34

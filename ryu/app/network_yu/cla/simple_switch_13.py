@@ -34,13 +34,15 @@ class SimpleSwitch13(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(SimpleSwitch13, self).__init__(*args, **kwargs)
         self.mac_to_port = {1:{'00:00:00:00:00:01':1,'00:00:00:00:00:02':2,'00:00:00:00:00:03':3,'00:00:00:00:00:04':4}}
+        self.class_tos = {0:12,1:24,2:48}
+        self.packet_class = {}
         self.p_num = {}
         self.dataSet = {}
         self.packet_lst = []
         self.host_lst = []
         self.flag = False
         self.pre_time = 0
-        self.cla = Cla(threshold=200,numSimple=500)
+        self.cla = Cla(numSimple=500)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -89,31 +91,24 @@ class SimpleSwitch13(app_manager.RyuApp):
     def feed_data(self,result):
 
         key,value = result[0],result[1]
-        #sub_time = value[1] - self.pre_time
-        #self.pre_time = value[1]
+        
         if key not in self.packet_lst:
             self.packet_lst.append(key)
             self.dataSet.setdefault(key,[])
-            #self.p_num[key] = 0
-
-        # if self.p_num[key] == 0:
-        #     value_lst = [value[0],0]
-        # else:
-        #     value_lst = [value[0],sub_time]
 
         self.dataSet[key].append(list(value))
-        #self.p_num[key] = self.p_num[key] + 1
+        
         length_packet = len(self.dataSet[key])
         if length_packet == 200:
             print("the length of dataSet is: %d" % len(self.dataSet[key]))
-            #self.pre_time = 0
-            #self.p_num[key] = 0#initiaziong count
             
             ret = self.cla.en_queue(key,self.dataSet[key])
+            if ret[0] == 0:
+                self.packet_class[(key[0],key[2])] = ret[1]
             self.dataSet[key][:] = []
-            return ret
+            return ret[0]
         
-        return 0
+        return 3
 
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -163,21 +158,29 @@ class SimpleSwitch13(app_manager.RyuApp):
                     else:
                         self.add_flow(datapath, 1, match, actions)
 
-        elif dst == '00:00:00:00:00:01' and self.flag==False:
+        elif dst == '00:00:00:00:00:01':
             out_port = 1
-            if isinstance(ip_pkt,ipv4.ipv4):         
-                res = self.packet_feature(msg,ip_pkt.src,ip_pkt.dst)
-                if res:
-                    self.flag = True #stop packet go forward to dataSet
-                    ret = self.feed_data(res)
-                    self.flag = False#start leting packet enter dataSet
-                    if ret == 2:
-                        self.flag = True
+
+            if self.flag == False:
+                if isinstance(ip_pkt,ipv4.ipv4):         
+                    res = self.packet_feature(msg,ip_pkt.src,ip_pkt.dst)
+                    if res:
+                        self.flag = True #stop packet go forward to dataSet
+                        ret = self.feed_data(res)
+                        self.flag = False#start leting packet enter dataSet
+                        if ret == 2 or ret == 0:# when writing is finished or packet is classfied
+                            self.flag = True
+
+            if (ip_pkt.src,ip_pkt.dst) in self.packet_class.keys():
+                match = parser.OFPMatch(in_port=in_port,eth_dst = dst,eth_src=src,ether_type=0x0800)
+                actions = [parser.OFPActionSetField(ip_dscp=26),parser.OFPActionOutput(out_port)]
+                self.add_flow(datapath,5,match,actions)
         # send pack-out message to datapath
         actions = [parser.OFPActionOutput(out_port)]
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
             data = msg.data
+            
 
         out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
                                   in_port=in_port, actions=actions, data=data)
